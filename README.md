@@ -196,6 +196,66 @@ By default Agent Vault stores all state in a local SQLite database, which requir
 
 Migrate existing data with `agent-vault migrate-db --to postgres://...` before switching. See the [PostgreSQL guide](https://docs.agent-vault.dev/self-hosting/postgres) for deployment examples (Kubernetes, Docker Compose), architecture notes, and operational details.
 
+## OpenBao
+
+This fork ([gently-whitesnow/agent-vault](https://github.com/gently-whitesnow/agent-vault), branch `hashicorp-store`) carries upstream [PR #256](https://github.com/Infisical/agent-vault/pull/256) — HashiCorp Vault as a read-only external credential store — and has been verified against [OpenBao](https://openbao.org) 2.6.2 (AppRole auth, KV v2). OpenBao speaks the same API, so no OpenBao-specific configuration is needed: point `VAULT_ADDR` at it and use the standard `VAULT_*` variables.
+
+### Image
+
+Built by [`.github/workflows/docker-openbao.yml`](.github/workflows/docker-openbao.yml) from the upstream [Dockerfile](Dockerfile) on every push to `hashicorp-store` and on `v*-openbao` tags (linux/amd64 + linux/arm64). Same runtime contract as upstream: entrypoint `docker-entrypoint.sh`, `USER agentvault` (uid 65532), `VOLUME /data`, API on `14321`, transparent proxy on `14322`. Pin by digest:
+
+```
+ghcr.io/gently-whitesnow/agent-vault@sha256:<digest>
+```
+
+The digest of the latest release is printed in the workflow run's job summary.
+
+### Environment variables
+
+Set these on the container (for example via a `.env` file mounted by Compose):
+
+| Variable | Required | Value |
+|----------|----------|-------|
+| `VAULT_ADDR` | yes | OpenBao base URL, e.g. `http://openbao:8200` |
+| `VAULT_ROLE_ID` | yes (AppRole) | AppRole RoleID (`bao read auth/approle/role/<role>/role-id`) |
+| `VAULT_SECRET_ID` | yes (AppRole) | AppRole SecretID (`bao write -f auth/approle/role/<role>/secret-id`) |
+| `VAULT_APPROLE_MOUNT` | no | AppRole mount path, default `approle` |
+| `VAULT_TOKEN` | alternative | Static token instead of AppRole (never renewed; AppRole is preferred) |
+| `VAULT_NAMESPACE`, `VAULT_CACERT`, `VAULT_SKIP_VERIFY` | no | Standard Vault client settings, honoured as-is |
+
+The KV mount and secret path are **not** environment variables — they are per-vault settings passed at `vault create` time (see below). The AppRole token is re-acquired automatically before its TTL lapses and once after a `403`.
+
+### OpenBao side
+
+```bash
+bao auth enable approle
+bao policy write agent-vault-ro - <<'EOF'
+path "secret/data/agent-vault/*"     { capabilities = ["read"] }
+path "secret/metadata/agent-vault/*" { capabilities = ["read", "list"] }
+EOF
+bao write auth/approle/role/agent-vault token_policies=agent-vault-ro token_ttl=1h token_max_ttl=24h secret_id_ttl=0
+bao read -field=role_id auth/approle/role/agent-vault/role-id
+bao write -f -field=secret_id auth/approle/role/agent-vault/secret-id
+bao kv put secret/agent-vault/demo ANTHROPIC_API_KEY=... GITHUB_TOKEN=...
+```
+
+Secret keys must be `UPPER_SNAKE_CASE`; each key/value pair of the single KV item becomes one credential in the vault.
+
+### Agent Vault side
+
+```bash
+agent-vault vault create bao \
+  --credential-store=hashicorp \
+  --hashicorp-mount=secret \
+  --hashicorp-path=agent-vault/demo \
+  --hashicorp-kv-version=2 \
+  --poll-interval-seconds=60
+agent-vault vault credential-store show bao   # sync health
+agent-vault vault credential-store sync bao   # force a refresh after rotating upstream
+```
+
+Only the instance owner can create external-store vaults. Credentials in such a vault are read-only from Agent Vault's side; rotate them in OpenBao and the syncer picks the change up on the next poll.
+
 ## SDK
 
 Agent Vault offers a TypeScript SDK in the event you'd like an orchestrator to mint a short-lived token and pass proxy config into a sandboxed agent to have it proxy requests through Agent Vault that way.
