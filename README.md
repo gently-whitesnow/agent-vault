@@ -205,14 +205,14 @@ This fork ([gently-whitesnow/agent-vault](https://github.com/gently-whitesnow/ag
 Built by [`.github/workflows/docker-openbao.yml`](.github/workflows/docker-openbao.yml) from the upstream [Dockerfile](Dockerfile) on every push to `hashicorp-store` and on `v*-openbao` tags (linux/amd64 + linux/arm64). Same runtime contract as upstream: entrypoint `docker-entrypoint.sh`, `USER agentvault` (uid 65532), `VOLUME /data`, API on `14321`, transparent proxy on `14322`. Pin by digest:
 
 ```
-ghcr.io/gently-whitesnow/agent-vault@sha256:<digest>
+ghcr.io/gently-whitesnow/agent-vault@sha256:411bda724582a7c6c89809c04f4bfdcef3b074c1946d855e5e983da2a82c65ee
 ```
 
-The digest of the latest release is printed in the workflow run's job summary.
+That digest is tag `v0.39.3-openbao` (upstream v0.39.3 + PR #256). Each workflow run prints its own digest in the job summary.
 
 ### Environment variables
 
-Set these on the container (for example via a `.env` file mounted by Compose):
+Set these on the container (for example via a `.env` file mounted by Compose). Without a TTY the first start also needs `AGENT_VAULT_MASTER_PASSWORD` (upstream prompts interactively for passwordless setup otherwise):
 
 | Variable | Required | Value |
 |----------|----------|-------|
