@@ -3,12 +3,15 @@ package hashicorp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	vaultapi "github.com/hashicorp/vault/api"
 )
@@ -25,6 +28,13 @@ type Client struct {
 	api    *vaultapi.Client
 	method AuthMethod
 	logger *slog.Logger
+
+	// AppRole-issued tokens carry a TTL. loginMu serializes re-logins;
+	// tokenExpiry is the wall-clock time the current token lapses (zero when
+	// the token has no TTL, e.g. a root/dev token or a VAULT_TOKEN).
+	loginMu     sync.Mutex
+	tokenExpiry time.Time
+	clock       func() time.Time
 }
 
 // NewClient returns ErrNotConfigured when VAULT_ADDR is unset (callers keep
@@ -64,7 +74,8 @@ func NewClient(ctx context.Context, logger *slog.Logger) (*Client, error) {
 		logger.Warn("hashicorp vault TLS verification disabled (VAULT_SKIP_VERIFY=true); the broker↔Vault channel is unauthenticated")
 	}
 
-	if err := login(ctx, api, method); err != nil {
+	c := &Client{api: api, method: method, logger: logger, clock: time.Now}
+	if err := c.login(ctx); err != nil {
 		return nil, fmt.Errorf("hashicorp login (%s): %w", method, err)
 	}
 
@@ -72,7 +83,7 @@ func NewClient(ctx context.Context, logger *slog.Logger) (*Client, error) {
 		slog.String("addr", addr),
 		slog.String("auth_method", string(method)))
 
-	return &Client{api: api, method: method, logger: logger}, nil
+	return c, nil
 }
 
 // AuthMethod returns the auth flow this client used.
@@ -82,6 +93,73 @@ func (c *Client) AuthMethod() AuthMethod { return c.method }
 // its key/value pairs into broker-facing Secrets. The API call is
 // context-aware, so cancellation propagates directly.
 func (c *Client) FetchSecrets(ctx context.Context, cfg VaultConfig) ([]Secret, error) {
+	if err := c.ensureToken(ctx); err != nil {
+		return nil, err
+	}
+	data, err := c.readKV(ctx, cfg)
+	// AppRole tokens can be revoked or lapse early (max_ttl, seal/unseal).
+	// A 403 from a KV read is the only signal; re-login once and retry.
+	if err != nil && c.method == AuthAppRole && isPermissionDenied(err) {
+		c.logger.Info("hashicorp read rejected (403); re-authenticating with AppRole")
+		if lerr := c.relogin(ctx); lerr != nil {
+			return nil, fmt.Errorf("re-login after 403: %w", lerr)
+		}
+		data, err = c.readKV(ctx, cfg)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Sort keys so the snapshot order is deterministic across syncs.
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := make([]Secret, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, Secret{Key: k, Value: stringValue(data[k])})
+	}
+	return out, nil
+}
+
+// ensureToken re-logs in ahead of AppRole token expiry so a long-running
+// server keeps syncing without a restart. Renewal is proactive: once past
+// two thirds of the token TTL, the next fetch acquires a fresh token.
+func (c *Client) ensureToken(ctx context.Context) error {
+	if c.method != AuthAppRole {
+		return nil
+	}
+	c.loginMu.Lock()
+	expiry := c.tokenExpiry
+	c.loginMu.Unlock()
+	if expiry.IsZero() || c.now().Before(expiry) {
+		return nil
+	}
+	c.logger.Info("hashicorp AppRole token nearing expiry; re-authenticating")
+	if err := c.relogin(ctx); err != nil {
+		return fmt.Errorf("re-login before expiry: %w", err)
+	}
+	return nil
+}
+
+// relogin serializes concurrent re-authentication attempts (several vaults
+// can refresh in the same tick) so only one AppRole login is issued.
+func (c *Client) relogin(ctx context.Context) error {
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+	return c.loginLocked(ctx)
+}
+
+// isPermissionDenied reports whether err is a Vault 403 response.
+func isPermissionDenied(err error) bool {
+	var re *vaultapi.ResponseError
+	return errors.As(err, &re) && re.StatusCode == 403
+}
+
+// readKV reads the single KV item at cfg.Mount/cfg.SecretPath.
+func (c *Client) readKV(ctx context.Context, cfg VaultConfig) (map[string]interface{}, error) {
 	var data map[string]interface{}
 	switch cfg.KVVersion {
 	case 2:
@@ -105,19 +183,7 @@ func (c *Client) FetchSecrets(ctx context.Context, cfg VaultConfig) ([]Secret, e
 	default:
 		return nil, fmt.Errorf("unsupported kv_version %d", cfg.KVVersion)
 	}
-
-	// Sort keys so the snapshot order is deterministic across syncs.
-	keys := make([]string, 0, len(data))
-	for k := range data {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	out := make([]Secret, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, Secret{Key: k, Value: stringValue(data[k])})
-	}
-	return out, nil
+	return data, nil
 }
 
 // stringValue coerces a KV value to a string. KV values are usually strings;
@@ -148,11 +214,35 @@ func stringValue(v interface{}) string {
 	}
 }
 
+// login authenticates api per method using the process environment. Kept as
+// a package-level helper for tests; NewClient goes through (*Client).login.
+func login(ctx context.Context, api *vaultapi.Client, method AuthMethod) error {
+	c := &Client{api: api, method: method, logger: slog.Default(), clock: time.Now}
+	return c.login(ctx)
+}
+
+// now returns the client's clock, defaulting to time.Now when unset (tests
+// construct Client literals without one).
+func (c *Client) now() time.Time {
+	if c.clock == nil {
+		return time.Now()
+	}
+	return c.clock()
+}
+
 // login authenticates the API client per the detected method. Token sets the
 // token and probes it; AppRole writes the login endpoint and adopts the
 // returned client token. Both leave api ready for KV reads.
-func login(ctx context.Context, api *vaultapi.Client, method AuthMethod) error {
-	switch method {
+func (c *Client) login(ctx context.Context) error {
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+	return c.loginLocked(ctx)
+}
+
+// loginLocked is login without taking loginMu; callers must hold it.
+func (c *Client) loginLocked(ctx context.Context) error {
+	api := c.api
+	switch c.method {
 	case AuthToken:
 		api.SetToken(os.Getenv("VAULT_TOKEN"))
 		// Token auth has no login round-trip, so an expired or malformed token
@@ -181,8 +271,15 @@ func login(ctx context.Context, api *vaultapi.Client, method AuthMethod) error {
 			return fmt.Errorf("approle login returned no client token")
 		}
 		api.SetToken(secret.Auth.ClientToken)
+		// Schedule a proactive re-login at two thirds of the TTL (at least
+		// 10s before expiry). A zero lease means the token never expires.
+		c.tokenExpiry = time.Time{}
+		if ttl := time.Duration(secret.Auth.LeaseDuration) * time.Second; ttl > 0 {
+			lead := max(ttl/3, 10*time.Second)
+			c.tokenExpiry = c.now().Add(ttl - lead)
+		}
 		return nil
 	default:
-		return fmt.Errorf("hashicorp: unsupported auth method %q", method)
+		return fmt.Errorf("hashicorp: unsupported auth method %q", c.method)
 	}
 }
