@@ -38,6 +38,30 @@ func (c VaultConfig) Validate() error {
 	if c.KVVersion != 1 && c.KVVersion != 2 {
 		return fmt.Errorf("kv_version must be 1 or 2")
 	}
+	// Pin reads to the KV data namespace: a ".." segment (or an encoded
+	// variant) would let the request escape /v1/{mount}/data/ into arbitrary
+	// Vault API paths.
+	for _, field := range []struct{ name, val string }{{"mount", c.Mount}, {"secret_path", c.SecretPath}} {
+		if err := validatePathField(field.name, field.val); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validatePathField rejects path-traversal and control characters in mount
+// and secret_path so the composed Vault URL stays within the KV mount.
+func validatePathField(name, val string) error {
+	for _, seg := range strings.Split(val, "/") {
+		if seg == "." || seg == ".." {
+			return fmt.Errorf("%s must not contain \".\" or \"..\" path segments", name)
+		}
+	}
+	for _, r := range val {
+		if r < 0x20 || r == 0x7f || r == '%' || r == '?' || r == '#' || r == '\\' {
+			return fmt.Errorf("%s contains an unsupported character %q", name, r)
+		}
+	}
 	return nil
 }
 
@@ -68,8 +92,8 @@ func ParseConfigJSON(raw string) (VaultConfig, error) {
 	if err := json.Unmarshal([]byte(raw), &c); err != nil {
 		return VaultConfig{}, err
 	}
-	c.Mount = strings.TrimSpace(c.Mount)
-	c.SecretPath = strings.TrimPrefix(strings.TrimSpace(c.SecretPath), "/")
+	c.Mount = strings.Trim(strings.TrimSpace(c.Mount), "/")
+	c.SecretPath = strings.Trim(strings.TrimSpace(c.SecretPath), "/")
 	return c.withDefaults(), nil
 }
 
