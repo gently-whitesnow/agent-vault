@@ -94,7 +94,7 @@ Supply env vars for one auth method. Detection picks the first complete group in
 A `VAULT_TOKEN` is validated at startup (a `lookup-self` probe), so an expired or malformed token fails fast rather than surfacing as a per-vault sync error on the first poll.
 
 <Note>
-  Agent Vault does **not** auto-renew the AppRole-issued token. When it expires, syncs fail (`last_sync_status=error`) and the vault keeps serving its last good snapshot until the server restarts and re-authenticates. Use a token TTL comfortably longer than your restart cadence, or restart to refresh.
+  The AppRole-issued token is re-acquired automatically: Agent Vault logs in again once two thirds of the token TTL have elapsed, and retries once after a `403` (for example when the token was revoked upstream). A `VAULT_TOKEN` is never renewed; if it expires, syncs fail (`last_sync_status=error`) and the vault keeps serving its last good snapshot until the server restarts with a fresh token. OpenBao works as a drop-in target — point `VAULT_ADDR` at it and use the same `VAULT_*` variables.
 </Note>
 
 <Tip>
