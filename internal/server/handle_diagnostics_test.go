@@ -161,3 +161,26 @@ func TestDiagnosticPrivateAPIAndRevocation(t *testing.T) {
 		t.Fatal("revoked membership")
 	}
 }
+
+func TestTelegramDiagnosticSupportsEcosystemHostOnlyAndInlineRules(t *testing.T) {
+	for _, host := range []string{"api.telegram.org", "api.telegram.org/bot*/getMe", "api.telegram.org:443/bot*"} {
+		raw := `[{"name":"telegram","host":"` + host + `","enabled":true,"auth":{"type":"passthrough"},"substitutions":[{"key":"TELEGRAM_TOKEN","placeholder":"__TG_TOKEN__","in":["path"]}]}]`
+		service, err := selectedDiagnosticService(&store.BrokerSnapshot{Config: &store.BrokerConfig{ServicesJSON: raw}}, "telegram")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if placeholder, ok := telegramPlaceholder(service); !ok || placeholder != "__TG_TOKEN__" {
+			t.Fatalf("host=%s service=%+v", host, service)
+		}
+	}
+	for _, host := range []string{"evil.example.com", "api.telegram.org/other/*", "api.telegram.org:8443/bot*"} {
+		raw := `[{"name":"telegram","host":"` + host + `","auth":{"type":"passthrough"},"substitutions":[{"key":"TOKEN","placeholder":"TOKEN","in":["path"]}]}]`
+		service, err := selectedDiagnosticService(&store.BrokerSnapshot{Config: &store.BrokerConfig{ServicesJSON: raw}}, "telegram")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := telegramPlaceholder(service); ok {
+			t.Fatal("unsupported destination accepted", host)
+		}
+	}
+}
