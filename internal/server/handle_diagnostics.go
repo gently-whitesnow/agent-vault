@@ -111,7 +111,7 @@ func (s *Server) diagnosticState(ctx context.Context, actor *Actor, request diag
 var diagnosticPlaceholder = regexp.MustCompile(`^[A-Za-z0-9_~-]{1,128}$`)
 
 func telegramPlaceholder(service *broker.Service) (string, bool) {
-	if service.Host != "api.telegram.org" || service.Path == "" || (service.Port != nil && *service.Port != 443) || len(service.Substitutions) != 1 || service.Auth.Type != "passthrough" {
+	if service.Host != "api.telegram.org" || (service.Port != nil && *service.Port != 443) || len(service.Substitutions) != 1 || service.Auth.Type != "passthrough" {
 		return "", false
 	}
 	substitution := service.Substitutions[0]
