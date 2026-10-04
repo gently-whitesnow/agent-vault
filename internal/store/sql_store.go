@@ -2344,7 +2344,7 @@ func (s *SQLStore) scanVault(row *sql.Row) (*Vault, error) {
 	return &v, nil
 }
 
-func (s *SQLStore) scanCredential(row *sql.Row) (*Credential, error) {
+func (s *SQLStore) scanCredential(row interface{ Scan(...interface{}) error }) (*Credential, error) {
 	var cred Credential
 	var createdAt, updatedAt interface{}
 	if err := row.Scan(&cred.ID, &cred.VaultID, &cred.Key, &cred.Type, &cred.Ciphertext, &cred.Nonce, &createdAt, &updatedAt); err != nil {

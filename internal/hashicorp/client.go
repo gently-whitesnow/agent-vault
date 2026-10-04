@@ -93,21 +93,33 @@ func (c *Client) AuthMethod() AuthMethod { return c.method }
 // its key/value pairs into broker-facing Secrets. The API call is
 // context-aware, so cancellation propagates directly.
 func (c *Client) FetchSecrets(ctx context.Context, cfg VaultConfig) ([]Secret, error) {
+	snapshot, err := c.FetchSnapshot(ctx, cfg)
+	return snapshot.Secrets, err
+}
+
+type Snapshot struct {
+	Secrets    []Secret
+	Version    *int
+	CreatedAt  time.Time
+	ObservedAt time.Time
+}
+
+func (c *Client) FetchSnapshot(ctx context.Context, cfg VaultConfig) (Snapshot, error) {
 	if err := c.ensureToken(ctx); err != nil {
-		return nil, err
+		return Snapshot{}, err
 	}
-	data, err := c.readKV(ctx, cfg)
+	data, snapshot, err := c.readSnapshot(ctx, cfg)
 	// AppRole tokens can be revoked or lapse early (max_ttl, seal/unseal).
 	// A 403 from a KV read is the only signal; re-login once and retry.
 	if err != nil && c.method == AuthAppRole && isPermissionDenied(err) {
 		c.logger.Info("hashicorp read rejected (403); re-authenticating with AppRole")
 		if lerr := c.relogin(ctx); lerr != nil {
-			return nil, fmt.Errorf("re-login after 403: %w", lerr)
+			return Snapshot{}, fmt.Errorf("re-login after 403: %w", lerr)
 		}
-		data, err = c.readKV(ctx, cfg)
+		data, snapshot, err = c.readSnapshot(ctx, cfg)
 	}
 	if err != nil {
-		return nil, err
+		return Snapshot{}, err
 	}
 
 	// Sort keys so the snapshot order is deterministic across syncs.
@@ -121,7 +133,8 @@ func (c *Client) FetchSecrets(ctx context.Context, cfg VaultConfig) ([]Secret, e
 	for _, k := range keys {
 		out = append(out, Secret{Key: k, Value: stringValue(data[k])})
 	}
-	return out, nil
+	snapshot.Secrets = out
+	return snapshot, nil
 }
 
 // ensureToken re-logs in ahead of AppRole token expiry so a long-running
@@ -158,32 +171,40 @@ func isPermissionDenied(err error) bool {
 	return errors.As(err, &re) && re.StatusCode == 403
 }
 
-// readKV reads the single KV item at cfg.Mount/cfg.SecretPath.
-func (c *Client) readKV(ctx context.Context, cfg VaultConfig) (map[string]interface{}, error) {
+// readSnapshot binds values and KV metadata from one upstream response.
+func (c *Client) readSnapshot(ctx context.Context, cfg VaultConfig) (map[string]interface{}, Snapshot, error) {
 	var data map[string]interface{}
+	snapshot := Snapshot{}
 	switch cfg.KVVersion {
 	case 2:
 		sec, err := c.api.KVv2(cfg.Mount).Get(ctx, cfg.SecretPath)
 		if err != nil {
-			return nil, err
+			return nil, snapshot, err
 		}
 		if sec == nil {
-			return nil, fmt.Errorf("no secret at %s/%s", cfg.Mount, cfg.SecretPath)
+			return nil, snapshot, fmt.Errorf("secret unavailable")
 		}
 		data = sec.Data
+		if sec.VersionMetadata == nil || sec.VersionMetadata.Version <= 0 {
+			return nil, snapshot, fmt.Errorf("KV2 metadata unavailable")
+		}
+		version := sec.VersionMetadata.Version
+		snapshot.Version = &version
+		snapshot.CreatedAt = sec.VersionMetadata.CreatedTime
 	case 1:
 		sec, err := c.api.KVv1(cfg.Mount).Get(ctx, cfg.SecretPath)
 		if err != nil {
-			return nil, err
+			return nil, snapshot, err
 		}
 		if sec == nil {
-			return nil, fmt.Errorf("no secret at %s/%s", cfg.Mount, cfg.SecretPath)
+			return nil, snapshot, fmt.Errorf("secret unavailable")
 		}
 		data = sec.Data
 	default:
-		return nil, fmt.Errorf("unsupported kv_version %d", cfg.KVVersion)
+		return nil, snapshot, fmt.Errorf("unsupported kv_version %d", cfg.KVVersion)
 	}
-	return data, nil
+	snapshot.ObservedAt = c.now().UTC()
+	return data, snapshot, nil
 }
 
 // stringValue coerces a KV value to a string. KV values are usually strings;

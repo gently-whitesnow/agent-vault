@@ -241,6 +241,16 @@ type credentialStoreAdapter struct {
 	Store
 }
 
+func (a credentialStoreAdapter) GetBrokerSnapshot(ctx context.Context, vaultID string) (*store.BrokerSnapshot, error) {
+	reader, ok := a.Store.(interface {
+		GetBrokerSnapshot(context.Context, string) (*store.BrokerSnapshot, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("atomic credential snapshots unavailable")
+	}
+	return reader.GetBrokerSnapshot(ctx, vaultID)
+}
+
 func (a credentialStoreAdapter) UnmatchedHostPolicy(ctx context.Context, vaultID string) (brokercore.UnmatchedHostPolicy, error) {
 	return readUnmatchedHostPolicy(ctx, a.Store, vaultID)
 }
@@ -910,6 +920,7 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	// Vault admin (owner-only)
 	mux.HandleFunc("GET /v1/admin/vaults", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAdminVaultList))))
 	mux.HandleFunc("GET /v1/vaults/{name}/services", s.requireInitialized(s.requireAuth(actorAuthed(s.handleServicesGet))))
+	mux.HandleFunc("POST /v1/vaults/{name}/diagnostics", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleDiagnostic)))))
 	mux.HandleFunc("POST /v1/vaults/{name}/services", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleServicesUpsert)))))
 	mux.HandleFunc("PUT /v1/vaults/{name}/services", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleServicesSet)))))
 	mux.HandleFunc("PATCH /v1/vaults/{name}/services/{host}", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleServicePatch)))))

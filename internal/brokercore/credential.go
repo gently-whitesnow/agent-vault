@@ -12,6 +12,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/broker"
 	"github.com/Infisical/agent-vault/internal/crypto"
+	"github.com/Infisical/agent-vault/internal/evidence"
 	"github.com/Infisical/agent-vault/internal/oauth"
 	"github.com/Infisical/agent-vault/internal/store"
 )
@@ -33,6 +34,7 @@ func IsValidUnmatchedHostPolicy(p UnmatchedHostPolicy) bool {
 // InjectResult is the outcome of matching (host, path) and resolving
 // credentials to ready-to-attach HTTP headers.
 type InjectResult struct {
+	Loaded *evidence.Loaded `json:"-"`
 	// Headers carries SECRET values — never log. Caller must Set (not
 	// Add) so injected values win over client-supplied duplicates.
 	// Nil for passthrough services.
@@ -113,7 +115,19 @@ func (p *StoreCredentialProvider) Inject(ctx context.Context, vaultID, targetHos
 	// A missing row is equivalent to an empty services list — fall
 	// through to the unmatched-host policy. Any other error fails closed
 	// so a transient store failure can't silently strip enforcement.
-	cfg, err := p.Store.GetBrokerConfig(ctx, vaultID)
+	var cfg *store.BrokerConfig
+	var err error
+	var snapshot *store.BrokerSnapshot
+	if reader, ok := p.Store.(interface {
+		GetBrokerSnapshot(context.Context, string) (*store.BrokerSnapshot, error)
+	}); ok {
+		snapshot, err = reader.GetBrokerSnapshot(ctx, vaultID)
+		if snapshot != nil {
+			cfg = snapshot.Config
+		}
+	} else {
+		cfg, err = p.Store.GetBrokerConfig(ctx, vaultID)
+	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrServiceNotFound
 	}
@@ -168,11 +182,24 @@ func (p *StoreCredentialProvider) Inject(ctx context.Context, vaultID, targetHos
 	// Memoize per-key lookups so a credential shared by auth and a
 	// substitution decrypts only once.
 	cache := make(map[string]string)
+	credentials := make(map[string]*store.Credential)
+	ciphertexts := make(map[string][2][]byte)
+	if snapshot != nil {
+		for index := range snapshot.Credentials {
+			credential := &snapshot.Credentials[index]
+			credentials[credential.Key] = credential
+			ciphertexts[credential.Key] = [2][]byte{credential.Ciphertext, credential.Nonce}
+		}
+	}
 	getCredential := func(key string) (string, error) {
 		if v, ok := cache[key]; ok {
 			return v, nil
 		}
-		cred, err := p.Store.GetCredential(ctx, vaultID, key)
+		cred := credentials[key]
+		var err error
+		if snapshot == nil {
+			cred, err = p.Store.GetCredential(ctx, vaultID, key)
+		}
 		if err != nil || cred == nil {
 			// No static credential: try resolving it as a dynamic-secret field.
 			if p.Dynamic != nil {
@@ -215,6 +242,18 @@ func (p *StoreCredentialProvider) Inject(ctx context.Context, vaultID, targetHos
 		MatchedPath:    matched.Path,
 		MatchedPort:    matched.Port,
 		CredentialKeys: matched.CredentialKeys(),
+	}
+	if snapshot != nil {
+		result.Loaded = &evidence.Loaded{Vault: vaultID, Service: matched.Name, Rule: evidence.Digest(matched), SnapshotID: evidence.SnapshotID(ciphertexts), Fingerprints: make(map[string]evidence.Fingerprint), At: time.Now().UTC()}
+	}
+	for _, key := range result.CredentialKeys {
+		value, err := getCredential(key)
+		if err != nil {
+			return result, fmt.Errorf("%w: credential unavailable", ErrCredentialMissing)
+		}
+		if result.Loaded != nil {
+			result.Loaded.Fingerprints[key] = evidence.Default.Fingerprint(value)
+		}
 	}
 
 	// Resolve substitutions before auth so passthrough services (which

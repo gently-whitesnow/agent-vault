@@ -15,6 +15,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/broker"
 	"github.com/Infisical/agent-vault/internal/crypto"
+	"github.com/Infisical/agent-vault/internal/evidence"
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
@@ -176,13 +177,13 @@ func (s *Syncer) refresh(ctx context.Context, cs store.VaultCredentialStore) err
 		return err
 	}
 
-	secs, err := s.fetcher.FetchSecrets(ctx, cfg)
+	snapshot, err := s.fetch(ctx, cfg)
 	if err != nil {
 		s.recordFailure(ctx, cs.VaultID, err)
 		return err
 	}
 
-	items, err := EncryptSecrets(secs, s.dek)
+	items, err := EncryptSecrets(snapshot.Secrets, s.dek)
 	if err != nil {
 		s.recordFailure(ctx, cs.VaultID, err)
 		return err
@@ -200,6 +201,13 @@ func (s *Syncer) refresh(ctx context.Context, cs store.VaultCredentialStore) err
 			slog.String("vault_id", cs.VaultID))
 		return nil
 	}
+	copy := copyEvidence(snapshot, cs.ConfigJSON)
+	evidence.Default.Observe(cs.VaultID, copy)
+	ciphertexts := make(map[string][2][]byte, len(items))
+	for _, item := range items {
+		ciphertexts[item.Key] = [2][]byte{item.Ciphertext, item.Nonce}
+	}
+	evidence.Default.Applied(cs.VaultID, evidence.SnapshotID(ciphertexts), copy)
 
 	// Replace + UpdateHealth are intentionally not in one transaction: a rare
 	// failure here leaves fresh credentials with stale last_synced_at, which
@@ -213,6 +221,42 @@ func (s *Syncer) refresh(ctx context.Context, cs store.VaultCredentialStore) err
 		slog.String("vault_id", cs.VaultID),
 		slog.Int("keys", len(items)))
 	return nil
+}
+
+func (s *Syncer) fetch(ctx context.Context, cfg VaultConfig) (Snapshot, error) {
+	if fetcher, ok := s.fetcher.(interface {
+		FetchSnapshot(context.Context, VaultConfig) (Snapshot, error)
+	}); ok {
+		return fetcher.FetchSnapshot(ctx, cfg)
+	}
+	secrets, err := s.fetcher.FetchSecrets(ctx, cfg)
+	return Snapshot{Secrets: secrets, ObservedAt: s.clock().UTC()}, err
+}
+
+func copyEvidence(snapshot Snapshot, config string) evidence.Copy {
+	fingerprints := make(map[string]evidence.Fingerprint, len(snapshot.Secrets))
+	for _, secret := range snapshot.Secrets {
+		fingerprints[secret.Key] = evidence.Default.Fingerprint(secret.Value)
+	}
+	return evidence.Copy{Config: evidence.Digest(config), Version: snapshot.Version, CreatedAt: snapshot.CreatedAt, ObservedAt: snapshot.ObservedAt, Fingerprints: fingerprints}
+}
+
+func (s *Syncer) ObserveCopy(ctx context.Context, cs store.VaultCredentialStore) (evidence.Copy, error) {
+	if s.fetcher == nil {
+		return evidence.Copy{}, ErrSyncerDisabled
+	}
+	if cs.Kind != store.CredentialStoreHashicorp {
+		return evidence.Copy{}, ErrNotExternal
+	}
+	cfg, err := ParseConfigJSON(cs.ConfigJSON)
+	if err != nil {
+		return evidence.Copy{}, err
+	}
+	snapshot, err := s.fetch(ctx, cfg)
+	if err != nil {
+		return evidence.Copy{}, err
+	}
+	return copyEvidence(snapshot, cs.ConfigJSON), nil
 }
 
 // EncryptSecrets encrypts plaintext HashiCorp Vault secrets for
