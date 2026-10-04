@@ -259,6 +259,13 @@ func (p *Proxy) forwardRequest(
 		emit(status, errCode)
 		return
 	}
+	if probe, ok := r.Context().Value(probeContextKey{}).(*probeExecution); ok {
+		if inject.Passthrough || inject.Loaded == nil || inject.MatchedName != probe.Service || inject.Loaded.Rule != probe.Rule {
+			probe.Category = "unsupported"
+			return
+		}
+		probe.Loaded = inject.Loaded
+	}
 
 	var body io.ReadCloser
 	var contentLength int64
@@ -334,6 +341,13 @@ func (p *Proxy) forwardRequest(
 		return
 	}
 
+	if probe, ok := r.Context().Value(probeContextKey{}).(*probeExecution); ok {
+		if outReq.Method != http.MethodGet || outReq.URL.Scheme != "https" || outReq.URL.Host != "api.telegram.org:443" || outReq.URL.RawQuery != "" || outReq.URL.Fragment != "" || outReq.URL.User != nil || !telegramTokenPath.MatchString(outReq.URL.Path) {
+			probe.Category = "forbidden_request"
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
 	resp, err := p.upstream.RoundTrip(outReq)
 	if err != nil {
 		p.logger.Debug("upstream request failed",
@@ -346,6 +360,7 @@ func (p *Proxy) forwardRequest(
 		emit(http.StatusBadGateway, "upstream_error")
 		return
 	}
+	recordForwarded(r.Context(), inject, scope)
 
 	// OAuth 401 retry: if the upstream rejected the token and we have an
 	// OAuth credential, force-refresh and retry once. Only safe methods
@@ -363,6 +378,7 @@ func (p *Proxy) forwardRequest(
 			retryReq.ContentLength = 0
 			if retryResp, retryRTErr := p.upstream.RoundTrip(retryReq); retryRTErr == nil {
 				resp = retryResp
+				recordForwarded(r.Context(), retryInject, scope)
 				p.logger.Debug("oauth 401 retry succeeded",
 					slog.String("host", host),
 					slog.String("path", r.URL.Path),
