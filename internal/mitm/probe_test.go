@@ -89,7 +89,7 @@ func TestDiagnosticUsesRealInjectionAndForwarding(t *testing.T) {
 			}
 			defer transport.CloseIdleConnections()
 			result := proxy.probeTelegram(ctx, scope, service.Name, evidence.Digest(&service), "DIAGNOSTIC_TOKEN", transport)
-			if result.Category != tc.category || !result.Used || result.Loaded == nil || requests != 1 {
+			if result.Category != tc.category || !result.Used || result.Loaded == nil || result.UsedAt == nil || requests != 1 {
 				t.Fatalf("result category=%s used=%v requests=%d", result.Category, result.Used, requests)
 			}
 			raw, _ := json.Marshal(result)
@@ -111,7 +111,7 @@ func TestDiagnosticUsesRealInjectionAndForwarding(t *testing.T) {
 		return nil, fmt.Errorf("must not dial")
 	}}
 	result := proxy.probeTelegram(ctx, scope, service.Name, evidence.Digest(&service), "DIAGNOSTIC_TOKEN", transport)
-	if calls != 0 || result.Used {
+	if calls != 0 || result.Used || result.Category != "forbidden_request" {
 		t.Fatal("unsafe substituted path forwarded")
 	}
 	replace(token)

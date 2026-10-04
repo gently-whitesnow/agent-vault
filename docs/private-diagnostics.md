@@ -48,7 +48,7 @@ DNS answers, connects to the selected IP without resolving it again, and ignores
 private-range overrides. Redirects are not followed. Total time is at most ten
 seconds; response data is bounded to 64 KiB. Only categories such as `ok`,
 `rejected`, `unsupported`, `unavailable`, `timeout`, `rate_limited`,
-`redirect_blocked` and `response_too_large` leave the boundary. Bot identity,
+`redirect_blocked`, `forbidden_request` (local refusal before dialing), and `response_too_large` leave the boundary. Bot identity,
 response bodies and upstream error text are not returned or logged.
 
 Evidence is held only in a bounded in-memory registry (256 records per channel, at most 256 fields per record,
@@ -63,3 +63,11 @@ no capability; callers must not invent a successful comparison.
 
 Tests use only synthetic SQLite identities/credentials, an isolated KV fixture
 and a TLS upstream fixture. They never mutate production secrets or memberships.
+
+Ingress observations currently cover the MITM HTTP forwarding path only.
+WebSocket upgrades and non-MITM paths remain `not_checked`. `used_at` is the
+registry timestamp recorded once upstream headers arrive; it is not a TCP
+send timestamp. The management probe returns that same recorded timestamp.
+Import markers expire after five minutes: with a longer sync interval, provenance
+can be `unavailable` between syncs even while credential use still works. This is
+missing evidence, not a failed credential or a reason to restart the proxy.

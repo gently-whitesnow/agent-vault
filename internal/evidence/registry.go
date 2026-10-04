@@ -165,9 +165,9 @@ func (r *Registry) Applied(vault, version string, copy Copy) {
 	r.imports[vault+":"+version] = Import{ID: ID(), SnapshotID: version, Copy: cloneCopy(copy), At: r.clock().UTC()}
 }
 
-func (r *Registry) RecordUsed(loaded *Loaded, kind, actorType, actorID, requestID string) {
+func (r *Registry) RecordUsed(loaded *Loaded, kind, actorType, actorID, requestID string) time.Time {
 	if loaded == nil || actorID == "" || len(loaded.Fingerprints) > maxFields {
-		return
+		return time.Time{}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -177,7 +177,9 @@ func (r *Registry) RecordUsed(loaded *Loaded, kind, actorType, actorID, requestI
 	}
 	copy := *loaded
 	copy.Fingerprints = cloneCopy(Copy{Fingerprints: loaded.Fingerprints}).Fingerprints
-	r.uses = append(r.uses, Used{Loaded: copy, ActorKind: kind, ActorType: actorType, ActorID: actorID, RequestID: requestID, At: r.clock().UTC()})
+	at := r.clock().UTC()
+	r.uses = append(r.uses, Used{Loaded: copy, ActorKind: kind, ActorType: actorType, ActorID: actorID, RequestID: requestID, At: at})
+	return at
 }
 
 func sameKeys(fingerprints map[string]Fingerprint, keys []string) bool {

@@ -70,6 +70,9 @@ func selectedDiagnosticService(snapshot *store.BrokerSnapshot, name string) (*br
 	if err := json.Unmarshal([]byte(snapshot.Config.ServicesJSON), &services); err != nil {
 		return nil, err
 	}
+	for i := range services {
+		services[i].Host, services[i].Path, services[i].Port = broker.SplitInlineHost(services[i].Host, services[i].Path)
+	}
 	broker.AssignSlugNames(services)
 	for index := range services {
 		if services[index].Name == name && services[index].IsEnabled() {
@@ -212,8 +215,7 @@ func (s *Server) handleDiagnostic(w http.ResponseWriter, r *http.Request) {
 				response.Loaded = evidence.Default.InspectObserved(probe.Loaded, guard.Config, observedCopy)
 				if probe.Used {
 					observation := response.Loaded
-					at := time.Now().UTC()
-					observation.UsedAt = &at
+					observation.UsedAt = probe.UsedAt
 					observation.ActorKind, observation.ActorType, observation.ActorID, observation.RequestID = "management_probe", actor.Type, actor.ID, probe.RequestID
 					probe.Evidence = &observation
 				}

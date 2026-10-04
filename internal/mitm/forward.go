@@ -341,8 +341,9 @@ func (p *Proxy) forwardRequest(
 		return
 	}
 
-	if _, ok := r.Context().Value(probeContextKey{}).(*probeExecution); ok {
+	if probe, ok := r.Context().Value(probeContextKey{}).(*probeExecution); ok {
 		if outReq.Method != http.MethodGet || outReq.URL.Scheme != "https" || outReq.URL.Host != "api.telegram.org:443" || outReq.URL.RawQuery != "" || outReq.URL.Fragment != "" || outReq.URL.User != nil || !telegramTokenPath.MatchString(outReq.URL.Path) {
+			probe.Category = "forbidden_request"
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

@@ -28,6 +28,7 @@ type probeExecution struct {
 	RequestID string
 	Loaded    *evidence.Loaded
 	Used      bool
+	UsedAt    *time.Time
 	Category  string
 }
 
@@ -37,6 +38,7 @@ type ProbeResult struct {
 	RequestID string           `json:"request_id"`
 	Loaded    *evidence.Loaded `json:"-"`
 	Used      bool             `json:"-"`
+	UsedAt    *time.Time       `json:"-"`
 }
 
 type probeResponse struct {
@@ -87,7 +89,7 @@ func (p *Proxy) probeTelegram(ctx context.Context, scope *brokercore.ProxyScope,
 		maxResponseBytes: 65536, maxRequestBytes: 1024}
 
 	defer func() {
-		result.Loaded, result.Used = execution.Loaded, execution.Used
+		result.Loaded, result.Used, result.UsedAt = execution.Loaded, execution.Used, execution.UsedAt
 		if recovered := recover(); recovered != nil {
 			if recovered != http.ErrAbortHandler {
 				panic(recovered)
@@ -96,7 +98,7 @@ func (p *Proxy) probeTelegram(ctx context.Context, scope *brokercore.ProxyScope,
 		}
 	}()
 	isolated.forwardRequest(response, request, "api.telegram.org:443", "api.telegram.org", 443, true, scope)
-	result.Loaded, result.Used = execution.Loaded, execution.Used
+	result.Loaded, result.Used, result.UsedAt = execution.Loaded, execution.Used, execution.UsedAt
 	if execution.Category != "" {
 		result.Category = execution.Category
 		return result
@@ -139,7 +141,10 @@ func recordForwarded(ctx context.Context, inject *brokercore.InjectResult, scope
 		probe.Used = true
 		probe.Loaded = inject.Loaded
 	}
-	evidence.Default.RecordUsed(inject.Loaded, kind, actorType, actorID, requestID)
+	at := evidence.Default.RecordUsed(inject.Loaded, kind, actorType, actorID, requestID)
+	if probe, ok := ctx.Value(probeContextKey{}).(*probeExecution); ok {
+		probe.UsedAt = &at
+	}
 }
 
 var _ io.Writer = (*probeResponse)(nil)

@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/evidence"
 	"github.com/Infisical/agent-vault/internal/hashicorp"
+	"github.com/Infisical/agent-vault/internal/mitm"
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
@@ -130,6 +132,21 @@ func TestDiagnosticPrivateAPIAndRevocation(t *testing.T) {
 	input.Operation = "telegram_get_me"
 	if call(token.ID, input).Code != 400 {
 		t.Fatal("probe without opt-in")
+	}
+	// Exercise actual handler, persisted inline-host rules and real injection.
+	// A malformed synthetic token must reach the local forwarding guard, never DNS.
+	fetcher.value = "123/../../dangerous"
+	if err = syncer.RefreshOnce(ctx, *cs); err != nil {
+		t.Fatal(err)
+	}
+	srv.AttachMITM(mitm.New("127.0.0.1:0", mitm.Options{Credentials: brokercore.NewStoreCredentialProvider(credentialStoreAdapter{db}, key), Logger: logger}))
+	input.OptIn = true
+	w = call(token.ID, input)
+	if err = json.Unmarshal(w.Body.Bytes(), &answer); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || answer.ManagementProbe == nil || answer.ManagementProbe.Category != "forbidden_request" || answer.ManagementProbe.Evidence != nil {
+		t.Fatalf("inline handler probe: %d %+v", w.Code, answer.ManagementProbe)
 	}
 	input = original
 	fetcher.hook = func() {
